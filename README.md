@@ -125,7 +125,7 @@ control uses anti-windup, a filtered pressure-rate term, and a PWM slew limit.
 - If pressure is not negative enough, the valve opens to the pump and PWM rises
   gradually.
 - If pressure becomes too negative, the pump turns off and the valve receives a
-  short LOW vent pulse; the controller waits 200 ms before correcting again.
+  short LOW vent pulse; the controller waits 100 ms before correcting again.
 - Inside the deadband, the valve remains on the pump path and PWM is adjusted
   only as needed to counter leakage.
 

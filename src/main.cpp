@@ -35,7 +35,7 @@ const uint8_t MAX_INVALID_READINGS = 3;
 const uint8_t PWM_OFF = 0;
 const uint8_t PWM_MAX = 255;
 const uint8_t PWM_SLEW_PER_CYCLE = 10;
-const uint32_t VENT_SETTLE_MS = 200;
+const uint32_t VENT_SETTLE_MS = 100;
 const float DERIVATIVE_FILTER_ALPHA = 0.25f;
 
 struct Tuning {
