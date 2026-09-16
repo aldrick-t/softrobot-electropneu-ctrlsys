@@ -7,3 +7,9 @@
 .DS_Store
 .vscode/settings.json
 .vscode
+
+# KiCAD
+*.kicad_pcb-bak
+*/*-backups
+*/*.lck
+*/*.lck
