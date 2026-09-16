@@ -10,8 +10,12 @@
 // Board connections retained from the original on/off controller.
 const uint8_t PIN_PWM_PUMP = 2;
 const uint8_t PIN_PWM_VALVE = 5;
+const uint8_t PIN_LED_TARGET_REACHED = 12;
+const uint8_t PIN_LED_ACTIVE = 13;
 const uint8_t PIN_I2C_SDA = 21;
 const uint8_t PIN_I2C_SCL = 22;
+const uint8_t PIN_SWITCH_MANUAL_FULL = 26;
+const uint8_t PIN_SWITCH_SERIAL = 27;
 
 const uint8_t ADS1115_GND_ADDRESS = 0x48;
 // Temporary bench-test override only. When true, the firmware falls back to the
@@ -59,10 +63,17 @@ enum class ControllerState {
   FAULT,
 };
 
+enum class ControlMode {
+  SAFE_OFF,
+  SERIAL_CONTROL,
+  MANUAL_FULL,
+};
+
 Adafruit_ADS1115 ads;
 Preferences preferences;
 Tuning tuning = DEFAULT_TUNING;
 ControllerState state = ControllerState::IDLE;
+ControlMode controlMode = ControlMode::SAFE_OFF;
 
 bool adsAvailable = false;
 uint8_t adsAddressInUse = ADS1115_GND_ADDRESS;
@@ -76,6 +87,8 @@ float previousVacuumKpa = NAN;
 float filteredVacuumRate = 0.0f;
 uint8_t pumpPwm = PWM_OFF;
 bool valveOpen = false;
+bool targetLedOn = false;
+bool activeLedOn = false;
 uint8_t invalidReadings = 0;
 uint32_t lastControlMs = 0;
 uint32_t phaseStartedMs = 0;
@@ -107,11 +120,38 @@ const char *stateName(ControllerState currentState) {
   return "UNKNOWN";
 }
 
+const char *controlModeName(ControlMode mode) {
+  switch (mode) {
+    case ControlMode::SAFE_OFF:
+      return "SAFE_OFF";
+    case ControlMode::SERIAL_CONTROL:
+      return "SERIAL";
+    case ControlMode::MANUAL_FULL:
+      return "MANUAL_FULL";
+  }
+  return "UNKNOWN";
+}
+
+bool isTargetReached() {
+  return controlMode == ControlMode::SERIAL_CONTROL && state == ControllerState::REGULATING &&
+         zeroCalibrated && isfinite(targetPressureKpa) && targetPressureKpa < 0.0f &&
+         isfinite(measuredPressureKpa) &&
+         fabsf(measuredPressureKpa - targetPressureKpa) <= tuning.bandKpa;
+}
+
+void updateIndicators() {
+  targetLedOn = isTargetReached();
+  activeLedOn = pumpPwm != PWM_OFF || valveOpen;
+  digitalWrite(PIN_LED_TARGET_REACHED, targetLedOn ? HIGH : LOW);
+  digitalWrite(PIN_LED_ACTIVE, activeLedOn ? HIGH : LOW);
+}
+
 void setOutputs(uint8_t requestedPumpPwm, bool openValve) {
   pumpPwm = requestedPumpPwm;
   valveOpen = openValve;
   analogWrite(PIN_PWM_PUMP, pumpPwm);
   analogWrite(PIN_PWM_VALVE, valveOpen ? PWM_MAX : PWM_OFF);
+  updateIndicators();
 }
 
 void resetPid() {
@@ -119,6 +159,50 @@ void resetPid() {
   previousVacuumKpa = NAN;
   filteredVacuumRate = 0.0f;
   lastPidMs = 0;
+}
+
+void cancelSerialControl() {
+  targetPressureKpa = 0.0f;
+  resetPid();
+  zeroSum = 0.0f;
+  zeroSumSquared = 0.0f;
+  zeroSamples = 0;
+  if (state != ControllerState::FAULT) {
+    state = ControllerState::IDLE;
+  }
+  updateIndicators();
+}
+
+ControlMode readControlMode() {
+  const bool manualFullSelected = digitalRead(PIN_SWITCH_MANUAL_FULL) == HIGH;
+  const bool serialSelected = digitalRead(PIN_SWITCH_SERIAL) == HIGH;
+
+  if (manualFullSelected && !serialSelected) {
+    return ControlMode::MANUAL_FULL;
+  }
+  if (!manualFullSelected && serialSelected) {
+    return ControlMode::SERIAL_CONTROL;
+  }
+  return ControlMode::SAFE_OFF;
+}
+
+void serviceControlMode() {
+  const ControlMode requestedMode = readControlMode();
+  if (requestedMode != controlMode) {
+    controlMode = requestedMode;
+    if (controlMode == ControlMode::MANUAL_FULL || controlMode == ControlMode::SAFE_OFF) {
+      cancelSerialControl();
+    }
+
+    Serial.print("MODE=");
+    Serial.println(controlModeName(controlMode));
+  }
+
+  if (controlMode == ControlMode::MANUAL_FULL) {
+    setOutputs(PWM_MAX, true);
+  } else if (controlMode == ControlMode::SAFE_OFF) {
+    setOutputs(PWM_OFF, false);
+  }
 }
 
 void stopAndVent(const char *message) {
@@ -213,6 +297,8 @@ bool initializeAds1115() {
 void reportStatus() {
   Serial.print("STATE=");
   Serial.print(stateName(state));
+  Serial.print(" MODE=");
+  Serial.print(controlModeName(controlMode));
   Serial.print(" V=");
   if (isfinite(measuredVolts)) {
     Serial.print(measuredVolts, 4);
@@ -231,6 +317,10 @@ void reportStatus() {
   Serial.print(pumpPwm);
   Serial.print(" VALVE=");
   Serial.print(valveOpen ? "OPEN" : "VENT");
+  Serial.print(" LED1=");
+  Serial.print(targetLedOn ? "ON" : "OFF");
+  Serial.print(" LED2=");
+  Serial.print(activeLedOn ? "ON" : "OFF");
   Serial.print(" ZERO=");
   Serial.print(zeroCalibrated ? "OK" : "REQUIRED");
   Serial.print(" KP=");
@@ -248,6 +338,11 @@ void reportStatus() {
 }
 
 void startZeroCalibration() {
+  if (controlMode != ControlMode::SERIAL_CONTROL) {
+    Serial.println("ERROR: ZERO is available only in SERIAL mode");
+    return;
+  }
+
   if (!adsAvailable || state == ControllerState::FAULT) {
     Serial.println("ERROR: ADS1115 unavailable; cannot ZERO");
     return;
@@ -266,6 +361,11 @@ void startZeroCalibration() {
 }
 
 void setTarget(float requestedTargetKpa) {
+  if (controlMode != ControlMode::SERIAL_CONTROL) {
+    Serial.println("ERROR: targets are available only in SERIAL mode");
+    return;
+  }
+
   if (!isfinite(requestedTargetKpa)) {
     stopAndVent("ERROR: target must be a finite number; venting");
     return;
@@ -295,6 +395,7 @@ void setTarget(float requestedTargetKpa) {
   resetPid();
   state = ControllerState::REGULATING;
   phaseStartedMs = millis();
+  updateIndicators();
   Serial.print("TARGET set to ");
   Serial.print(targetPressureKpa, 2);
   Serial.println(" kPa");
@@ -311,7 +412,11 @@ bool parseFloatToken(const char *token, float &value) {
 }
 
 void commandError(const char *message) {
-  stopAndVent(message);
+  if (controlMode == ControlMode::SERIAL_CONTROL) {
+    stopAndVent(message);
+  } else {
+    Serial.println(message);
+  }
 }
 
 void handleTuningCommand(const char *name, const char *argument, const char *extra) {
@@ -559,6 +664,10 @@ void setup() {
 
   pinMode(PIN_PWM_PUMP, OUTPUT);
   pinMode(PIN_PWM_VALVE, OUTPUT);
+  pinMode(PIN_LED_TARGET_REACHED, OUTPUT);
+  pinMode(PIN_LED_ACTIVE, OUTPUT);
+  pinMode(PIN_SWITCH_MANUAL_FULL, INPUT);
+  pinMode(PIN_SWITCH_SERIAL, INPUT);
   setOutputs(PWM_OFF, false);
 
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
@@ -581,10 +690,11 @@ void setup() {
 }
 
 void loop() {
+  serviceControlMode();
   serviceSerial();
 
   const uint32_t now = millis();
-  if (now - lastControlMs >= CONTROL_PERIOD_MS) {
+  if (controlMode == ControlMode::SERIAL_CONTROL && now - lastControlMs >= CONTROL_PERIOD_MS) {
     lastControlMs = now;
     updateController(now);
   }

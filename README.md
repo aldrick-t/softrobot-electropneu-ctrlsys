@@ -15,6 +15,10 @@ a 5 V XGZP6847A pressure sensor. It is set up for the installed
 | --- | --- | --- |
 | Pump motor PWM | ESP32 GPIO 2 | `0` is off; `255` is full duty cycle. |
 | Solenoid valve | ESP32 GPIO 5 | HIGH opens the pump-to-gripper path; LOW de-energizes the valve and vents the gripper. |
+| Target-reached LED1 (green) | ESP32 GPIO 12 through 220 Ω to GND | On only when serial closed-loop pressure is within the configured deadband. |
+| Active LED2 | ESP32 GPIO 13 through 220 Ω to GND | On when firmware commands nonzero pump PWM or energizes the valve. |
+| Mode switch: manual full | ESP32 GPIO 26 with 1 kΩ pulldown | 3.3 V selects pump PWM `255` and valve open. |
+| Mode switch: serial control | ESP32 GPIO 27 with 1 kΩ pulldown | 3.3 V enables serial closed-loop control. |
 | ADS1115 SDA | ESP32 GPIO 21 through the 3.3 V/5 V I2C level shifter | Initialized with `Wire.begin(21, 22)`. |
 | ADS1115 SCL | ESP32 GPIO 22 through the 3.3 V/5 V I2C level shifter | Initialized with `Wire.begin(21, 22)`. |
 | XGZP6847A output | ADS1115 A0 | Read as a 5 V-domain analog signal; it never connects directly to the ESP32. |
@@ -74,6 +78,28 @@ set this toggle to `false` and rebuild.
 Boot starts deliberately uncalibrated. The firmware leaves the pump and valve
 off and rejects negative targets until `ZERO` succeeds.
 
+### Switch modes and LEDs
+
+The SPDT mode switch is the output authority. The firmware reads both switch
+inputs on every loop and accepts only these complementary states:
+
+| GPIO 26 | GPIO 27 | Mode | Output behavior |
+| --- | --- | --- | --- |
+| HIGH | LOW | Manual full-drive | Pump PWM is `255` and the valve is energized, even if the ADS1115 is unavailable or faulted. Entering this mode cancels any serial target or calibration in progress. LED2 is on; LED1 is off. |
+| LOW | HIGH | Serial closed-loop | The controller remains vented/idle until a new negative serial target is sent. Existing ADC, `ZERO`, target-range, and fault checks apply. |
+| LOW | LOW | Safe off | Pump and valve are de-energized. |
+| HIGH | HIGH | Safe off | Pump and valve are de-energized. |
+
+Returning from manual full-drive to serial mode does not restore an earlier
+target; send `ZERO` if needed, then a new negative target. In manual or
+safe-off mode, `ZERO` and numeric target commands are rejected. `STATUS`,
+tuning commands, `SAVE`, and `DEFAULTS` remain available.
+
+LED1 is off while the controller ramps, vents, settles, calibrates, idles, is
+faulted, or is in manual/safe-off mode. LED2 represents **commanded drive**:
+it cannot prove that a disconnected, stalled, or failed motor/valve is drawing
+current because this board has no current-sense circuit.
+
 ## Operation
 
 With the pressure port open to atmosphere, first send:
@@ -105,8 +131,8 @@ values clamp to zero and vent. Any zero representation stops control and vents:
 
 | Command | Effect |
 | --- | --- |
-| `ZERO` | Vent, establish atmospheric offset, and permit negative targets. Required after every reboot. |
-| `STATUS` | Print controller state, voltage, pressure, target, PWM, valve state, ADC address, calibration state, and tuning. |
+| `ZERO` | In serial mode, vent, establish atmospheric offset, and permit negative targets. Required after every reboot. |
+| `STATUS` | Print controller state, mode, voltage, pressure, target, PWM, valve state, LED states, ADC address, calibration state, and tuning. |
 | `KP <value>` | Set proportional gain in RAM; allowed range 0–50. |
 | `KI <value>` | Set integral gain in RAM; allowed range 0–20. |
 | `KD <value>` | Set derivative damping gain in RAM; allowed range 0–10. |
@@ -145,10 +171,12 @@ setOutputs(PWM_OFF, false);
 ```
 
 This output path is used at boot, after `0`, after a positive target clamps to
-zero, after malformed input, during zeroing, and on pressure/ADC faults. With
-the stated plumbing, valve-off is also the pneumatic vent state; it does not
-attempt to hold vacuum. Therefore the valve coil is not intentionally kept
-energized while idle, avoiding prolonged activation and overheating.
+zero, after malformed input, during zeroing, on pressure/ADC faults, and for
+invalid mode-switch states. The D26 manual-full mode is the explicit exception:
+it deliberately drives both outputs even with a sensor fault. With the stated
+plumbing, valve-off is also the pneumatic vent state; it does not attempt to
+hold vacuum. Therefore the valve coil is not intentionally kept energized while
+idle, avoiding prolonged activation and overheating.
 
 This conclusion assumes a non-inverting valve driver where GPIO 5 HIGH
 energizes the coil, as defined by the original controller. Confirm that once
@@ -157,12 +185,19 @@ with a multimeter or indicator LED before connecting a gripper.
 ## First physical test
 
 1. Test with the gripper disconnected or a conservative vented fixture.
-2. Boot and send `STATUS`; verify `PWM=0`, `VALVE=VENT`, and `ZERO=REQUIRED`.
+2. Select serial mode (GPIO 27 HIGH) and send `STATUS`; verify `MODE=SERIAL`,
+   `PWM=0`, `VALVE=VENT`, `LED1=OFF`, `LED2=OFF`, and `ZERO=REQUIRED`.
 3. Run `ZERO` with the port open to atmosphere. If possible, compare reported
    voltage with a multimeter at ADS1115 A0.
-4. Start with `-5`, then `-10`; verify motor PWM ramps rather than jumps.
-5. Send `0` and verify both PWM outputs are zero before longer tests.
-6. Tune one variable at a time and send `SAVE` only after physical validation.
+4. Start with `-5`, then `-10`; verify motor PWM ramps rather than jumps,
+   LED2 is on while the pump or valve is commanded, and LED1 turns on only
+   after pressure reaches the configured deadband.
+5. Send `0` and verify both PWM outputs and both LEDs are off before longer tests.
+6. Select manual full-drive (GPIO 26 HIGH) and verify `PWM=255`, `VALVE=OPEN`,
+   LED2 on, and LED1 off. Return to serial mode and verify it remains vented
+   until a new negative target is sent.
+7. Verify both-low and both-high switch input states keep both outputs and LEDs off.
+8. Tune one variable at a time and send `SAVE` only after physical validation.
 
 Never treat the −90 kPa software clamp as proof that the gripper, tubing,
 fittings, or pump are safe at that pressure.

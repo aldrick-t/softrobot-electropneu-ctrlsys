@@ -5,11 +5,11 @@
 	(uuid "615b99f8-9cd1-4796-ae24-03d81b739354")
 	(paper "A4")
 	(title_block
-		(title "Common Gripper Control Board Schematic")
-		(date "2025-10-31")
-		(rev "R4")
-		(company "YEA+ALFRESI")
-		(comment 1 "Schematic by: Aldrick T")
+		(title "Pneumatic Control Board Schematic")
+		(date "2026-09-15")
+		(rev "R5")
+		(company "aldrick-t")
+		(comment 1 "Schematic by: Aldrick Tadeo")
 	)
 	(lib_symbols
 		(symbol "Connector:Barrel_Jack_Switch"
