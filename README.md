@@ -33,73 +33,6 @@ pressure_kPa = 50 × (sensor_volts − zero_volts)
 `ZERO` removes the atmospheric offset; it does not replace a calibrated span
 check against a reference gauge.
 
-### ADS1115 ADDR: temporary test override
-
-For reliable normal operation, wire ADS1115 `ADDR` to GND and use I2C address
-`0x48`. The ADS1115 samples this address-selection pin continuously, so a
-floating pin is not dependable.
-
-For initial bench testing, `src/main.cpp` includes:
-
-```cpp
-const bool ALLOW_FLOATING_ADS1115_ADDR_FOR_TESTING = true;
-```
-
-With this temporary toggle enabled, firmware first tries `0x48`, then the
-other legal ADS1115 addresses (`0x49`, `0x4A`, `0x4B`). It prints a warning if
-the ADC is found away from `0x48`; `STATUS` also reports `ADS_ADDR`. This only
-accommodates an accidentally stable floating pin. After wiring `ADDR → GND`,
-set this toggle to `false` and rebuild.
-
-## Installation and upload
-
-1. Install [PlatformIO for VS Code](https://platformio.org/install/ide?install=vscode)
-   and open this repository as a PlatformIO project.
-2. Confirm `platformio.ini` targets `esp32doit-devkit-v1`.
-3. Build. PlatformIO installs `Adafruit ADS1X15` automatically; `Arduino`,
-   `Wire`, and ESP32 `Preferences` are framework libraries.
-
-   ```sh
-   pio run
-   ```
-
-4. Connect the ESP32 by USB and upload:
-
-   ```sh
-   pio run --target upload
-   ```
-
-5. Open a serial monitor at **115200 baud** with line ending set to `Newline`:
-
-   ```sh
-   pio device monitor --baud 115200
-   ```
-
-Boot starts deliberately uncalibrated. The firmware leaves the pump and valve
-off and rejects negative targets until `ZERO` succeeds.
-
-### Switch modes and LEDs
-
-The SPDT mode switch is the output authority. The firmware reads both switch
-inputs on every loop and accepts only these complementary states:
-
-| GPIO 26 | GPIO 27 | Mode | Output behavior |
-| --- | --- | --- | --- |
-| HIGH | LOW | Manual full-drive | Pump PWM is `255` and the valve is energized, even if the ADS1115 is unavailable or faulted. Entering this mode cancels any serial target or calibration in progress. LED2 is on; LED1 is off. |
-| LOW | HIGH | Serial closed-loop | The controller remains vented/idle until a new negative serial target is sent. Existing ADC, `ZERO`, target-range, and fault checks apply. |
-| LOW | LOW | Safe off | Pump and valve are de-energized. |
-| HIGH | HIGH | Safe off | Pump and valve are de-energized. |
-
-Returning from manual full-drive to serial mode does not restore an earlier
-target; send `ZERO` if needed, then a new negative target. In manual or
-safe-off mode, `ZERO` and numeric target commands are rejected. `STATUS`,
-tuning commands, `SAVE`, and `DEFAULTS` remain available.
-
-LED1 is off while the controller ramps, vents, settles, calibrates, idles, is
-faulted, or is in manual/safe-off mode. LED2 represents **commanded drive**:
-it cannot prove that a disconnected, stalled, or failed motor/valve is drawing
-current because this board has no current-sense circuit.
-
 ## Operation
 
 With the pressure port open to atmosphere, first send:
@@ -161,9 +94,77 @@ Tune them on the real pump, tubing volume, valve flow, and gripper before
 relying on them. In particular, confirm that valve-on/pump-off holds vacuum
 without overheating a non-continuous-duty valve coil.
 
+### Switch modes and LEDs
+
+The SPDT mode switch is the output authority. The firmware reads both switch
+inputs on every loop and accepts only these complementary states:
+
+| GPIO 26 | GPIO 27 | Mode | Output behavior |
+| --- | --- | --- | --- |
+| HIGH | LOW | Manual full-drive | Pump PWM is `255` and the valve is energized, even if the ADS1115 is unavailable or faulted. Entering this mode cancels any serial target or calibration in progress. LED2 is on; LED1 is off. |
+| LOW | HIGH | Serial closed-loop | The controller remains vented/idle until a new negative serial target is sent. Existing ADC, `ZERO`, target-range, and fault checks apply. |
+| LOW | LOW | Safe off | Pump and valve are de-energized. |
+| HIGH | HIGH | Safe off | Pump and valve are de-energized. |
+
+Returning from manual full-drive to serial mode does not restore an earlier
+target; send `ZERO` if needed, then a new negative target. In manual or
+safe-off mode, `ZERO` and numeric target commands are rejected. `STATUS`,
+tuning commands, `SAVE`, and `DEFAULTS` remain available.
+
+LED1 is off while the controller ramps, vents, settles, calibrates, idles, is
+faulted, or is in manual/safe-off mode. LED2 represents **commanded drive**:
+it cannot prove that a disconnected, stalled, or failed motor/valve is drawing
+current because this board has no current-sense circuit.
+
+### ADS1115 ADDR override
+
+For reliable normal operation, wire ADS1115 `ADDR` to GND and use I2C address
+`0x48`. The ADS1115 samples this address-selection pin continuously, so a
+floating pin is not dependable.
+
+For initial bench testing, `src/main.cpp` includes:
+
+```cpp
+const bool ALLOW_FLOATING_ADS1115_ADDR_FOR_TESTING = true;
+```
+
+With this temporary toggle enabled, firmware first tries `0x48`, then the
+other legal ADS1115 addresses (`0x49`, `0x4A`, `0x4B`). It prints a warning if
+the ADC is found away from `0x48`; `STATUS` also reports `ADS_ADDR`. This only
+accommodates an accidentally stable floating pin. After wiring `ADDR → GND`,
+set this toggle to `false` and rebuild.
+
+## Installation and upload
+
+1. Install [PlatformIO for VS Code](https://platformio.org/install/ide?install=vscode)
+   and open this repository as a PlatformIO project.
+2. Confirm `platformio.ini` targets `esp32doit-devkit-v1`.
+3. Build. PlatformIO installs `Adafruit ADS1X15` automatically; `Arduino`,
+   `Wire`, and ESP32 `Preferences` are framework libraries.
+
+   ```sh
+   pio run
+   ```
+
+4. Connect the ESP32 by USB and upload:
+
+   ```sh
+   pio run --target upload
+   ```
+
+5. Open a serial monitor at **115200 baud** with line ending set to `Newline`:
+
+   ```sh
+   pio device monitor --baud 115200
+   ```
+
+Boot starts deliberately uncalibrated. The firmware leaves the pump and valve
+off and rejects negative targets until `ZERO` succeeds.
+
+
 ## Idle, off, and fault behavior
 
-Yes: the firmware commands **both motor and valve off electrically** when it
+The firmware commands **both motor and valve off electrically** when it
 is idle or at atmospheric pressure:
 
 ```cpp
