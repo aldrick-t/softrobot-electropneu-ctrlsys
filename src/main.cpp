@@ -25,6 +25,7 @@ const bool ALLOW_FLOATING_ADS1115_ADDR_FOR_TESTING = true;
 const uint8_t ADS1115_CHANNEL = 0;
 
 const uint32_t CONTROL_PERIOD_MS = 50;
+const uint32_t STATUS_STREAM_PERIOD_MS = CONTROL_PERIOD_MS;
 const uint32_t ZERO_SETTLE_MS = 1000;
 const uint8_t ZERO_SAMPLE_COUNT = 32;
 const uint8_t ADC_AVERAGE_COUNT = 4;
@@ -39,7 +40,6 @@ const uint8_t MAX_INVALID_READINGS = 3;
 const uint8_t PWM_OFF = 0;
 const uint8_t PWM_MAX = 255;
 const uint8_t PWM_SLEW_PER_CYCLE = 10;
-const uint32_t VENT_SETTLE_MS = 100;
 const float DERIVATIVE_FILTER_ALPHA = 0.25f;
 
 struct Tuning {
@@ -47,10 +47,9 @@ struct Tuning {
   float ki;
   float kd;
   float bandKpa;
-  uint16_t ventMs;
 };
 
-const Tuning DEFAULT_TUNING = {12.0f, 1.0f, 0.3f, 0.5f, 20};
+const Tuning DEFAULT_TUNING = {6.0f, 0.0f, 0.6f, 1.0f};
 const char *PREFERENCES_NAMESPACE = "vacuum-ctl";
 
 enum class ControllerState {
@@ -58,8 +57,6 @@ enum class ControllerState {
   CALIBRATING_SETTLE,
   CALIBRATING_SAMPLE,
   REGULATING,
-  VENTING,
-  SETTLING,
   FAULT,
 };
 
@@ -99,6 +96,8 @@ uint8_t zeroSamples = 0;
 
 char serialLine[96];
 size_t serialLength = 0;
+bool statusStreamEnabled = false;
+uint32_t lastStatusStreamMs = 0;
 
 const char *stateName(ControllerState currentState) {
   switch (currentState) {
@@ -110,10 +109,6 @@ const char *stateName(ControllerState currentState) {
       return "ZERO_SAMPLE";
     case ControllerState::REGULATING:
       return "REGULATING";
-    case ControllerState::VENTING:
-      return "VENTING";
-    case ControllerState::SETTLING:
-      return "SETTLING";
     case ControllerState::FAULT:
       return "FAULT";
   }
@@ -229,8 +224,7 @@ bool tuningIsValid(const Tuning &candidate) {
   return isfinite(candidate.kp) && candidate.kp >= 0.0f && candidate.kp <= 50.0f &&
          isfinite(candidate.ki) && candidate.ki >= 0.0f && candidate.ki <= 20.0f &&
          isfinite(candidate.kd) && candidate.kd >= 0.0f && candidate.kd <= 10.0f &&
-         isfinite(candidate.bandKpa) && candidate.bandKpa >= 0.1f && candidate.bandKpa <= 5.0f &&
-         candidate.ventMs >= 5 && candidate.ventMs <= 100;
+         isfinite(candidate.bandKpa) && candidate.bandKpa >= 0.1f && candidate.bandKpa <= 5.0f;
 }
 
 void loadTuning() {
@@ -241,7 +235,6 @@ void loadTuning() {
       loaded.ki = preferences.getFloat("ki", DEFAULT_TUNING.ki);
       loaded.kd = preferences.getFloat("kd", DEFAULT_TUNING.kd);
       loaded.bandKpa = preferences.getFloat("band", DEFAULT_TUNING.bandKpa);
-      loaded.ventMs = preferences.getUShort("vent", DEFAULT_TUNING.ventMs);
     }
     preferences.end();
   }
@@ -257,8 +250,7 @@ bool saveTuning() {
   const bool saved = preferences.putFloat("kp", tuning.kp) > 0 &&
                      preferences.putFloat("ki", tuning.ki) > 0 &&
                      preferences.putFloat("kd", tuning.kd) > 0 &&
-                     preferences.putFloat("band", tuning.bandKpa) > 0 &&
-                     preferences.putUShort("vent", tuning.ventMs) > 0;
+                     preferences.putFloat("band", tuning.bandKpa) > 0;
   preferences.end();
   return saved;
 }
@@ -331,8 +323,6 @@ void reportStatus() {
   Serial.print(tuning.kd, 3);
   Serial.print(" BAND=");
   Serial.print(tuning.bandKpa, 2);
-  Serial.print(" VENT_MS=");
-  Serial.print(tuning.ventMs);
   Serial.print(" ADS_ADDR=0x");
   Serial.println(adsAddressInUse, HEX);
 }
@@ -435,13 +425,6 @@ void handleTuningCommand(const char *name, const char *argument, const char *ext
     candidate.kd = value;
   } else if (strcasecmp(name, "BAND") == 0) {
     candidate.bandKpa = value;
-  } else if (strcasecmp(name, "VENT") == 0) {
-    const long rounded = lroundf(value);
-    if (fabsf(value - rounded) > 0.001f || rounded < 0 || rounded > UINT16_MAX) {
-      commandError("ERROR: VENT must be an integer number of milliseconds; venting");
-      return;
-    }
-    candidate.ventMs = static_cast<uint16_t>(rounded);
   } else {
     commandError("ERROR: unknown command; venting");
     return;
@@ -485,6 +468,10 @@ void processCommand(char *line) {
     startZeroCalibration();
   } else if (strcasecmp(command, "STATUS") == 0 && argument == nullptr) {
     reportStatus();
+  } else if (strcasecmp(command, "STATUS_STREAM") == 0 && argument == nullptr) {
+    statusStreamEnabled = !statusStreamEnabled;
+    Serial.print("STATUS stream ");
+    Serial.println(statusStreamEnabled ? "enabled" : "disabled");
   } else if (strcasecmp(command, "SAVE") == 0 && argument == nullptr) {
     Serial.println(saveTuning() ? "Tuning saved" : "ERROR: tuning could not be saved");
   } else if (strcasecmp(command, "DEFAULTS") == 0 && argument == nullptr) {
@@ -492,8 +479,7 @@ void processCommand(char *line) {
     resetPid();
     Serial.println("Safe defaults loaded in RAM; send SAVE to persist");
   } else if (strcasecmp(command, "KP") == 0 || strcasecmp(command, "KI") == 0 ||
-             strcasecmp(command, "KD") == 0 || strcasecmp(command, "BAND") == 0 ||
-             strcasecmp(command, "VENT") == 0) {
+             strcasecmp(command, "KD") == 0 || strcasecmp(command, "BAND") == 0) {
     handleTuningCommand(command, argument, extra);
   } else {
     commandError("ERROR: malformed command; venting");
@@ -569,30 +555,21 @@ void updateRegulation(uint32_t now) {
   const float targetVacuumKpa = -targetPressureKpa;
   const float errorKpa = targetVacuumKpa - measuredVacuumKpa;
 
-  if (state == ControllerState::VENTING) {
-    setOutputs(PWM_OFF, false);
-    if (now - phaseStartedMs >= tuning.ventMs) {
-      state = ControllerState::SETTLING;
-      phaseStartedMs = now;
-      setOutputs(PWM_OFF, true);
-    }
-    return;
-  }
-
-  if (state == ControllerState::SETTLING) {
-    setOutputs(PWM_OFF, true);
-    if (now - phaseStartedMs >= VENT_SETTLE_MS) {
-      state = ControllerState::REGULATING;
+  // Do not use the full-flow atmosphere vent as a fine pressure actuator.
+  // At or beyond the target, turn the pump off but retain the pump-to-gripper
+  // path. This avoids a 50 ms minimum passive-vent pulse while still allowing
+  // normal leakage to bring an overshoot back toward the target.
+  if (errorKpa <= tuning.bandKpa) {
+    if (errorKpa < -tuning.bandKpa) {
+      // An overshoot must not leave integral drive queued for the next cycle.
       resetPid();
+    } else {
+      integralTerm *= 0.98f;
+      previousVacuumKpa = measuredVacuumKpa;
+      filteredVacuumRate = 0.0f;
+      lastPidMs = now;
     }
-    return;
-  }
-
-  if (errorKpa < -tuning.bandKpa) {
-    resetPid();
-    state = ControllerState::VENTING;
-    phaseStartedMs = now;
-    setOutputs(PWM_OFF, false);
+    setOutputs(PWM_OFF, true);
     return;
   }
 
@@ -609,13 +586,9 @@ void updateRegulation(uint32_t now) {
   previousVacuumKpa = measuredVacuumKpa;
   filteredVacuumRate += DERIVATIVE_FILTER_ALPHA * (vacuumRate - filteredVacuumRate);
 
-  if (fabsf(errorKpa) <= tuning.bandKpa) {
-    integralTerm *= 0.98f;
-  } else {
-    integralTerm += errorKpa * dtSeconds;
-    integralTerm = constrain(integralTerm, -PWM_MAX / fmaxf(tuning.ki, 0.001f),
-                             PWM_MAX / fmaxf(tuning.ki, 0.001f));
-  }
+  integralTerm += errorKpa * dtSeconds;
+  integralTerm = constrain(integralTerm, -PWM_MAX / fmaxf(tuning.ki, 0.001f),
+                           PWM_MAX / fmaxf(tuning.ki, 0.001f));
 
   const float requestedPwm = tuning.kp * errorKpa + tuning.ki * integralTerm - tuning.kd * filteredVacuumRate;
   uint8_t desiredPwm = requestedPwm <= 0.0f ? PWM_OFF : static_cast<uint8_t>(constrain(requestedPwm, 0.0f, static_cast<float>(PWM_MAX)));
@@ -652,7 +625,7 @@ void updateController(uint32_t now) {
 
   if (state == ControllerState::CALIBRATING_SETTLE || state == ControllerState::CALIBRATING_SAMPLE) {
     updateCalibration(now);
-  } else if (state == ControllerState::REGULATING || state == ControllerState::VENTING || state == ControllerState::SETTLING) {
+  } else if (state == ControllerState::REGULATING) {
     updateRegulation(now);
   } else {
     setOutputs(PWM_OFF, false);
@@ -697,5 +670,10 @@ void loop() {
   if (controlMode == ControlMode::SERIAL_CONTROL && now - lastControlMs >= CONTROL_PERIOD_MS) {
     lastControlMs = now;
     updateController(now);
+  }
+
+  if (statusStreamEnabled && now - lastStatusStreamMs >= STATUS_STREAM_PERIOD_MS) {
+    lastStatusStreamMs = now;
+    reportStatus();
   }
 }

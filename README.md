@@ -133,11 +133,11 @@ values clamp to zero and vent. Any zero representation stops control and vents:
 | --- | --- |
 | `ZERO` | In serial mode, vent, establish atmospheric offset, and permit negative targets. Required after every reboot. |
 | `STATUS` | Print controller state, mode, voltage, pressure, target, PWM, valve state, LED states, ADC address, calibration state, and tuning. |
+| `STATUS_STREAM` | Toggle continuous `STATUS` output at 20 Hz. Send `STATUS_STREAM` again to stop it. |
 | `KP <value>` | Set proportional gain in RAM; allowed range 0–50. |
 | `KI <value>` | Set integral gain in RAM; allowed range 0–20. |
 | `KD <value>` | Set derivative damping gain in RAM; allowed range 0–10. |
 | `BAND <kPa>` | Set deadband in RAM; allowed range 0.1–5 kPa. |
-| `VENT <ms>` | Set overshoot vent-pulse duration in RAM; allowed range 5–100 ms. |
 | `SAVE` | Persist current validated tuning in ESP32 Preferences. |
 | `DEFAULTS` | Restore conservative default tuning in RAM; send `SAVE` to retain it after reboot. |
 
@@ -150,14 +150,16 @@ control uses anti-windup, a filtered pressure-rate term, and a PWM slew limit.
 
 - If pressure is not negative enough, the valve opens to the pump and PWM rises
   gradually.
-- If pressure becomes too negative, the pump turns off and the valve receives a
-  short LOW vent pulse; the controller waits 100 ms before correcting again.
-- Inside the deadband, the valve remains on the pump path and PWM is adjusted
-  only as needed to counter leakage.
+- At or beyond the target deadband, the pump turns off while the valve remains
+  on the pump-to-gripper path. The controller does not use the full-flow
+  atmosphere vent as a corrective actuator.
+- Passive venting (valve off) remains the safety/release path for `0`, faults,
+  malformed commands, and `ZERO`.
 
-Initial tuning is deliberately conservative: `KP=12`, `KI=1`, `KD=0.3`,
-`BAND=0.5 kPa`, and `VENT=20 ms`. Tune it on the real pump, tubing volume,
-valve flow, and gripper before relying on it.
+This checkout's defaults are `KP=18`, `KI=1`, `KD=0.3`, and `BAND=0.5 kPa`.
+Tune them on the real pump, tubing volume, valve flow, and gripper before
+relying on them. In particular, confirm that valve-on/pump-off holds vacuum
+without overheating a non-continuous-duty valve coil.
 
 ## Idle, off, and fault behavior
 
